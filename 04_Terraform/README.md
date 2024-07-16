@@ -1150,22 +1150,24 @@ jobs:
           terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
 ```
 
-Análisis por partes:
+### Nivel Superior: `name` y `on`
 
 ```yaml
 name: "Terraform"
-
 on:
-  # Uncomment to enable staging deploy from main
-  # push:
-  #   branches:
-  #     - main
   release:
     types: [published]
   pull_request:
 ```
 
-En este bloque se define cuando se va a ejecutar el workflow, en este caso, cuando se haga un release o un pull request.
+- **name:** Define el nombre de la acción como "Terraform".
+- **on:** Define los eventos que desencadenan esta acción:
+  - **release:** Se ejecuta cuando se publica un nuevo release.
+  - **pull_request:** Se ejecuta en solicitudes de extracción (pull requests).
+
+### `jobs`
+
+Definen los trabajos a ejecutar.
 
 ```yaml
 jobs:
@@ -1179,11 +1181,29 @@ jobs:
       run:
         working-directory: 07-managing-multiple-environments/file-structure/staging
     steps:
+      ...
+```
+
+- **name:** Nombre del trabajo, también "Terraform".
+- **runs-on:** La máquina virtual en la que se ejecutará el trabajo, en este caso `ubuntu-latest`.
+- **env:** Variables de entorno para AWS credentials.
+- **defaults:** Directorio de trabajo predeterminado para los comandos de `run`.
+
+### `steps`
+
+Lista de pasos que se ejecutarán dentro del trabajo `terraform`.
+
+#### Paso 1: Checkout
+
+```yaml
       - name: Checkout
         uses: actions/checkout@v2
 ```
 
-En este bloque se define el job, en este caso, se llama `terraform`, se ejecutará en un ambiente de ubuntu, se definen las variables de entorno y el directorio de trabajo.
+- **name:** Nombre del paso.
+- **uses:** Acción de GitHub para verificar el código del repositorio.
+
+#### Paso 2: Setup Terraform
 
 ```yaml
       - name: Setup Terraform
@@ -1193,30 +1213,51 @@ En este bloque se define el job, en este caso, se llama `terraform`, se ejecutar
           terraform_wrapper: false
 ```
 
-En este bloque se configura Terraform, se define la versión de Terraform que se va a usar.
+- **name:** Configura Terraform.
+- **uses:** Acción de GitHub para configurar Terraform.
+- **with:** Parámetros específicos para la acción, incluyendo la versión de Terraform y si se debe usar un wrapper.
+
+#### Paso 3: Terraform Format
 
 ```yaml
       - name: Terraform Format
         id: fmt
         run: terraform fmt -check
+```
 
+- **name:** Verifica el formato de los archivos de Terraform.
+- **id:** Identificador para usar en pasos posteriores.
+- **run:** Comando para ejecutar.
+
+#### Paso 4: Terraform Init
+
+```yaml
       - name: Terraform Init
         id: init
         run: terraform init
 ```
 
-En este bloque se ejecutan los comandos `terraform fmt` y `terraform init`.
+- **name:** Inicializa los archivos de configuración de Terraform.
+- **id:** Identificador.
+- **run:** Comando para ejecutar.
+
+#### Paso 5: Terraform Plan (Pull Requests)
 
 ```yaml
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request'
-        # Route 53 zone must already exist for this to succeed!
         run: terraform plan -var db_pass=${{secrets.DB_PASS }} -no-color
         continue-on-error: true
 ```
 
-En este bloque se ejecuta el comando `terraform plan`, pero solo si el evento es un pull request.
+- **name:** Genera y muestra un plan de ejecución de Terraform.
+- **id:** Identificador.
+- **if:** Condición para ejecutar este paso solo en pull requests.
+- **run:** Comando para ejecutar.
+- **continue-on-error:** Permite que el flujo continúe incluso si este paso falla.
+
+#### Paso 6: Publicar Comentarios en Pull Requests
 
 ```yaml
       - uses: actions/github-script@0.9.0
@@ -1236,10 +1277,24 @@ En este bloque se ejecuta el comando `terraform plan`, pero solo si el evento es
 
             </details>
 
-            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+              
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
 ```
 
-En este bloque se crea un comentario en el pull request con los resultados de los comandos anteriores.
+- **uses:** Acción para ejecutar scripts personalizados.
+- **if:** Condición para ejecutar solo en pull requests.
+- **env:** Configura una variable de entorno `PLAN` con la salida del plan de Terraform.
+- **with:** Parámetros específicos, incluyendo el token de GitHub.
+- **script:** Script para crear un comentario en el pull request con los resultados de los pasos anteriores.
+
+#### Paso 7: Terraform Plan Status
 
 ```yaml
       - name: Terraform Plan Status
@@ -1247,13 +1302,24 @@ En este bloque se crea un comentario en el pull request con los resultados de lo
         run: exit 1
 ```
 
-En este bloque se verifica si el comando `terraform plan` falló, si es así, se termina el workflow.
+- **name:** Verifica el estado del plan de Terraform.
+- **if:** Condición para ejecutar si el plan falla.
+- **run:** Comando para salir con error.
+
+#### Paso 8: Configurar Go
 
 ```yaml
       - uses: actions/setup-go@v2
         with:
           go-version: '^1.15.5'
-          
+```
+
+- **uses:** Acción para configurar Go.
+- **with:** Parámetros específicos, incluyendo la versión de Go.
+
+#### Paso 9: Ejecución de Terratest
+
+```yaml
       - name : Terratest Execution
         if: github.event_name == 'pull_request'
         working-directory: 08-testing/tests/terratest
@@ -1261,7 +1327,12 @@ En este bloque se verifica si el comando `terraform plan` falló, si es así, se
           go test . -v timeout 10m
 ```
 
-En este bloque se ejecutan los tests de Terratest.
+- **name:** Ejecuta pruebas con Terratest.
+- **if:** Condición para ejecutar solo en pull requests.
+- **working-directory:** Directorio de trabajo específico para este paso.
+- **run:** Comando para ejecutar las pruebas.
+
+#### Paso 10: Verificar Etiqueta
 
 ```yaml
       - name: Check tag
@@ -1273,7 +1344,11 @@ En este bloque se ejecutan los tests de Terratest.
           fi
 ```
 
-En este bloque se verifica si el evento es un release o un push a la rama main.
+- **name:** Verifica si el commit está etiquetado.
+- **id:** Identificador.
+- **run:** Script que establece la variable de entorno `environment` según la etiqueta del commit.
+
+#### Paso 11: Terraform Apply Global
 
 ```yaml
       - name: Terraform Apply Global
@@ -1282,11 +1357,28 @@ En este bloque se verifica si el evento es un release o un push a la rama main.
         run: |
           terraform init
           terraform apply -auto-approve
+```
 
+- **name:** Aplica la configuración de Terraform para el entorno global.
+- **if:** Condición para ejecutar en eventos de push o release.
+- **working-directory:** Directorio de trabajo específico para este paso.
+- **run:** Comandos para inicializar y aplicar Terraform.
+
+#### Paso 12: Terraform Apply Staging
+
+```yaml
       - name: Terraform Apply Staging
         if: steps.check-tag.outputs.environment == 'staging' && github.event_name == 'push'
         run: terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
+```
 
+- **name:** Aplica la configuración de Terraform para el entorno de staging.
+- **if:** Condición para ejecutar si el entorno es staging y es un evento de push.
+- **run:** Comando para aplicar Terraform con las credenciales de la base de datos.
+
+#### Paso 13: Terraform Apply Production
+
+```yaml
       - name: Terraform Apply Production
         if: steps.check-tag.outputs.environment == 'production' && github.event_name == 'release'
         working-directory: 07-managing-multiple-environments/file-structure/production
@@ -1295,4 +1387,9 @@ En este bloque se verifica si el evento es un release o un push a la rama main.
           terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
 ```
 
-En este bloque se ejecutan los comandos `terraform apply` dependiendo del ambiente.
+- **name:** Aplica la configuración de Terraform para el entorno de producción.
+- **if:** Condición para ejecutar si el entorno es producción y es un evento de release.
+- **working-directory:** Directorio de trabajo específico para este paso.
+- **run:** Comandos para inicializar y aplicar Terraform.
+
+En resumen, esta acción de GitHub ejecuta varios pasos de Terraform y pruebas de integración cada vez que se crea una pull request o se publica un nuevo release. Realiza la configuración necesaria, verifica el formato y el plan de Terraform, ejecuta pruebas con Terratest, y aplica las configuraciones a diferentes entornos (global, staging y producción) según sea necesario.
