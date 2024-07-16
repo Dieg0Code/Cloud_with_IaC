@@ -346,340 +346,953 @@ El resto de la configuración seria la misma
 
 Cuando ejecutemos `terraform init` Terraform nos preguntará si queremos migrar nuestro archivo de estado local al backend remoto, si decimos que si, Terraform se encargará de mover el archivo de estado al bucket de S3 y de configurar la tabla de DynamoDB.
 
-## Ejemplo de Web App
+## Variables y Outputs
 
-![Web App](./assets/architecture.png)
+Muchas cosas pueden ser parametrizadas en Terraform, por ejemplo, podemos parametrizar el nombre de una instancia EC2, el tamaño de una base de datos, el nombre de un bucket de S3, etc. Las variables son útiles para no hardcodear datos sensibles en nuestros archivos de configuración como contraseñas, claves privadas, etc.
 
-En este ejemplo necesitamos 5 recursos de AWS:
+### Tipos de Variables
 
-- Amazon Route 53
-- Elastic load balancer
-- Amazon EC2 (dos instancias)
-- Amazon Simple Storage Service (S3)
-- Amazon RDS
+- Input Variables
+  - `var`.\<name>
 
-Todos estos recursos se pueden definir en un archivo de configuración de Terraform.
+  ```hcl
+  variable "instance_type" {
+    description = "ec2 instance type"
+    type = string
+    default = "t2.micro"
+  }
+  ```
 
-#### Storage del backend y Proveedores requeridos
+  Este tipo de variables nos permiten escoger de manera dinámica valores para nuestros recursos mediante el input del usuario.
+
+- Local variables
+  - `local`.\<name>
+
+  ```hcl
+  locals {
+    service_name = "my-service"
+    owner = "owner"
+  }
+  ```
+
+  Este tipo de variables tienen un scope local como el de una función por ejemplo, se usan para definir valores que se van a usar en multiples recursos, de esta forma los centralizamos en un solo lugar y así evitamos tener que escribir el valor cada vez.
+
+- Output Variables
+  - `output`.\<name>
+
+  ```hcl
+  output "instance_ip_addr" {
+    value = aws_instance.example.public_ip
+  }
+  ```
+
+  Este tipo de variables son como un `return` en un lenguaje de programación, nos permiten devolver valores de nuestros recursos para que puedan ser capturados y usados posteriormente.
+
+### Configuración de Input Variables
+
+- Ingreso manual durante la ejecución de los comandos `apply` o `plan`
+
+```bash
+terraform apply -var 'instance_type=t2.large'
+```
+
+- Valores por defecto en un bloque de declaración de variables
 
 ```hcl
-terraform {
-  # Asume que el bucket S3 y la tabla DynamoDB ya existen
-  backend "s3" {
-    bucket = "terraform-remote-state-2024" # Nombre del bucket creado en AWS
-    key = "web-app/terraform.tfstate" # Nombre del archivo de estado
-    region = "sa-east-1" # Región donde se encuentra el bucket - LATAM
-    dynamodb_table = "terraform-state-locking" # Nombre de la tabla DynamoDB
-    encrypt = true # Encriptar el archivo de estado
-  }
-
-
-  required_providers {
-    aws = {
-      source = "hashicorp/aws"
-      version = "5.57.0"
-    }
-  }
+variable "instance_type" {
+  description = "ec2 instance type"
+  type = string
+  default = "t2.micro"
 }
 ```
 
-En este bloque estamos definiendo en donde se va a guardar el archivo de estado, asumimos que los recursos en donde se guardará ya fueron creados. Ademas establecemos el proveedor que se va a usar `AWS` en la versión `5.57.0`.
+- TF_VAR_\<name> variables de entorno
 
-#### Configuración del proveedor y Creación de las instancias EC2
-
-```hcl
-provider "aws" {
-  region = "sa-east-1"
-}
-
-resource "aws_instance" "instance 1" {
-    ami = "ami-080111c1449900431" # Ubuntu 20.04 LTS - sa-east-1
-    instance_type = "t2.micro"
-    security_groups = [aws_security_group.insances.name]
-    user_data = <<-EOF
-        #!/bin/bash
-        echo "Hello, World 1" > index.html
-        python3 -m http.server 8080 &
-    EOF
-  
-}
-
-resource "aws_instance" "instance 2" {
-    ami = "ami-080111c1449900431" # Ubuntu 20.04 LTS - sa-east-1
-    instance_type = "t2.micro"
-    security_groups = [aws_security_group.insances.name]
-    user_data = <<-EOF
-        #!/bin/bash
-        echo "Hello, World 2" > index.html
-        python3 -m http.server 8080 &
-    EOF
-  
-}
+```bash
+export TF_VAR_instance_type=t2.large
 ```
 
-- Configuramos el proveedor de AWS en la región `sa-east-1`, que seria los servidores para LATAM, el centro de datos está en Sao Paulo, Brasil.
-- Creamos dos instancias EC2, una para cada servidor, con ``ami (Amazon Machine Image)`` de Ubuntu 20.04 LTS, tipo de instancia `t2.micro`, un grupo de seguridad y un script de inicio.
-- El script de inicio crea un archivo `index.html` con un mensaje y levanta un servidor web en el puerto 8080.
-
-#### Creación y configuración de el Bucket S3
-
-```hcl
-resource "aws_s3_bucket" "bucket" {
-  bucket = "terraform-remote-state-2024"
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_versioning" "bucket_versioning" {
-  bucket = aws_s3_bucket.bucket.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-  
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption" {
-  bucket = aws_s3_bucket.bucket.bucket
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-  
-}
+```cmd
+set TF_VAR_instance_type=t2.large
 ```
 
-- Creamos la instancia del Bucket y la nombramos `terraform-remote-state-2024`.
-- Habilitamos la versión del bucket. Esto se usa para mantener un historial de versiones de los archivos almacenados en el bucket.
-- Configuramos la encriptación del bucket. Esto se usa para encriptar los archivos almacenados en el bucket, lo cual es recomendado.
-
-#### Creación y configuración del VPC (Virtual Private Cloud)
+- terraform.tfvars file
 
 ```hcl
-# data se usa para usar recursos que ya existen en AWS, en este caso usamos el VPC por defecto que se crea
-# con la cuenta de AWS
-data "aws_vpc" "default_vpc" {
-  default = true
-}
-
-data "aws_subnet_ids" "default_subnets" {
-  vpc_id = data.aws_vpc.default_vpc.id
-}
-
-resource "aws_security_group" "instances" {
-  name = "instance-security-group"
-}
-
-resource "aws_security_group_rule" "allow_http_inbound" {
-  type = "ingress"
-  security_group_id = aws_security_group.instances.id
-
-  from_port = 8080
-  to_port = 8080
-  protocol = "tcp"
-  cidr_blocks = ["0.0.0.0/0"] # Cualquier IP puede acceder al puerto 8080
-}
+instance_type = "t2.large"
 ```
 
-- Usamos `data` para usar recursos que ya está creados, en este caso usamos el VPC por defecto que se crea con la cuenta de AWS.
-- Usamos `data` para obtener los IDs de las subredes por defecto del VPC.
-- Creamos un grupo de seguridad para las instancias EC2.
-- Creamos una regla de seguridad para permitir el tráfico HTTP en el puerto 8080.
-- La regla permite que cualquier IP acceda al puerto 8080.
-
-#### Load Balancer Config
+- *.auto.tfvars file
 
 ```hcl
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.load_balancer_arn
-  port = 80
-  protocol = "HTTP"
+instance_type = "t2.large"
+```
 
-  #Por defecto, devuelve una página de error 404
-  default_action {
-    type = "fixed-response"
+- Linea de comandos `-var` o `-var-file`
 
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "404 Not Found"
-      status_code = "404"
-    }
+```bash
+terraform apply -var-file="example.tfvars"
+```
+
+### Tipos y Validación
+
+#### Tipos Primitivos
+
+- string
+- number
+- bool
+
+#### Tipos Complejos
+
+- list(\<TYPE>)
+- set(\<TYPE>)
+- map(\<TYPE>)
+- object({\<ATTR NAME> = \<TYPE>, ...})
+- tuple([\<TYPE>, ...])
+
+#### Validación
+
+- La comprobación de tipos ocurre automáticamente
+- Se pueden configurar condiciones personalizadas
+
+```hcl
+variable "instance_type" {
+  description = "ec2 instance type"
+  type = string
+  default = "t2.micro"
+  validation {
+    condition = length(var.instance_type) > 0
+    error_message = "The instance type must not be empty"
   }
 }
 ```
 
-- Creamos un listener para el Load Balancer.
-- El listener escucha en el puerto 80 y protocolo HTTP.
-- Configuramos una acción por defecto para el listener. En este caso, si no se encuentra la página solicitada, se devuelve un error 404.
+### Datos Sensibles
+
+**Podemos marcar variables como sensibles**.
+
+- Sensitive = true
+
+```bash
+Terraform will perform the following actions
+
+# some_resource.a will be created
++ resource "some_resource" "a" {
+  + sensitive_value = (sensitive)
+}
+```
+
+**Pasarle variables de entorno al comando `apply`.
+
+- TF_VAR_variable
+- `-var` (recuperada desde el secret manager en tiempo de ejecución)
+
+**También se puede usar un secret store externo**
+
+- Por ejemplo, AWS Secrets Manager
+
+## Features adicionales del lenguaje
+
+### Expresiones
+
+- Template strings
+- Operadores (!, -, +, *, /, %, >, ==, etc)
+- Condicionales (conditional ? true : false)
+- For ([ for o in var.list : o.id ])
+- Splat (var.list[*].id)
+- Dynamic Blocks
+- Constraints (Type & Version)
+
+### Funciones
+
+- Numéricas
+- String
+- Collections
+- Encoding
+- Filesystem
+- Date & Time
+- Hash & Crypto
+- IP Network
+- Type Conversion
+
+### Meta-Arguments
+
+#### depends_on
+
+- Terraform genera automáticamente un grafo de dependencias basado en referencias.
+
+- Si dos recursos dependen uno del otro (pero no de alguna otra cosa), *depends_on* especifica esa dependencia para reforzar el orden de creación.
 
 ```hcl
-resource "aws_lb_target_group" "intances" {
-  name = "example-target-group"
-  port = 8080
-  protocol = "HTTP"
-  vpc_id = data.aws_vpc.default_vpc.id
+resource "aws_iam_role" "example" {
+  name = "example"
+  assume_role_policy = "..."
+}
 
-  health_check {
-    path = "/"
-    protocol = "HTTP"
-    matcher = "200"
-    interval = 15 # Cada 15 segundos
-    timeout = 3 # Timeout de 3 segundos
-    healthy_threshold = 2 # 2 veces consecutivas
-    unhealthy_threshold = 2 # 2 veces consecutivas
+resource "aws_iam_role_policy" "example" {
+  role = aws_iam_role.example.name
+}
+
+resource "aws_iam_role_policy" "example" {
+  name = "example"
+  role = aws_iam_role.example.name
+  policy = jsonencode({
+    "Statement" = [{
+      "Action" = "s3:*",
+      "Effect" = "Allow",
+    }],
+  })
+}
+
+resource "aws_instance" "example" {
+  ami = "ami-abc123"
+  instance_type = "t2.micro"
+
+  iam_instance_profile = aws_iam_instance_profile.example
+
+  depends_on = [
+    aws_iam_role_policy.example,
+  ]
+}
+```
+
+- Por ejemplo, si el software en una instancia necesita acceso a un bucket S3, la creación de esa instancia fallará si se hace antes de crear el *aws_iam_role_policy*, por lo que podemos especificar a Terraform que la creación de esa instancia depende de que primero se cree el *aws_iam_role_policy*
+
+#### Count
+
+- Permite la creación de multiples resources/modules desde un solo bloque de código.
+
+- Es útil cuando multiples recursos son necesarios pero son prácticamente idénticos.
+
+```hcl
+resource "aws_instance" "server" {
+  count = 4 # crea cuatro instancias EC2
+
+  ami = "ami-abc1234"
+  instance_type = "t2.micro"
+
+  tags = {
+    Name = "Server ${count.index}"
   }
 }
 ```
 
-- Creamos un target group para el Load Balancer. Un target group es un grupo de instancias que reciben tráfico del Load Balancer, en este caso, las instancias EC2.
-- El target group escucha en el puerto 8080 y protocolo HTTP.
-- Con `vpn_id` especificamos el VPC en el que se encuentra el target group.
-- Configuramos un health check para el target group. El health check verifica que las instancias estén saludables y respondan correctamente al tráfico. Cada una de las propiedades del health check se explican en los comentarios.
+#### for_each
+
+- Permite la creación de múltiples resources/modules desde un solo bloque de código.
+
+- Permite más control para customizar cada recurso que **count**
 
 ```hcl
-resource "aws_lb_target_group_attachment" "instance_1" {
-  target_group_arn = aws_lb_target_group.intances.arn
-  target_id = aws_instance.instance_1.id
-  port = 8080
+locals {
+  subnet_ids = toset([
+    "subnet-abcde",
+    "subnet-012345",
+  ])
 }
-```
 
-- Creamos un attachment para el target group. Un attachment es una relación entre el target group y una instancia EC2.
-- El attachment especifica que la instancia `instance_1` es parte del target group `intances` y recibe tráfico del Load Balancer en el puerto 8080.
+resource  "aws_instance" "server" {
+  for_each = local.subnet_ids
 
-```hcl
-resource "aws_lb_target_group_attachment" "instance_2" {
-  target_group_arn = aws_lb_target_group.intances.arn
-  target_id = aws_instance.instance_2.id
-  port = 8080
-}
-```
+  ami = "ami-a1b2c3d4"
+  instance_type = "t2.micro"
+  subnet_id = each.key
 
-- Creamos un attachment para la segunda instancia EC2.
-- El attachment especifica que la instancia `instance_2` es parte del target group `intances` y recibe tráfico del Load Balancer en el puerto 8080.
-
-```hcl
-resource "aws_lb_listener_rule" "instances" {
-  listener_arn = aws_lb_listener.http.arn
-  priority = 100
-
-  condition {
-    path_pattern {
-      values = ["*"]
-    }
-  }
-
-  action {
-    type = "forward"
-    target_group_arn = aws_lb_target_group.intances.arn
+  tags = {
+    Name = "Server ${each.key}"
   }
 }
 ```
 
-- Creamos una regla para el listener. Una regla especifica cómo se enruta el tráfico del listener al target group.
-- Se establece la condición de la regla. En este caso, la regla se aplica a todas las rutas.
-- Se establece la acción de la regla. En este caso, el tráfico se reenvía al target group `intances`. Osea todas las rutas son redirigidas a las instancias EC2.
+#### Lifecycle
 
-#### Security group para el Load Balancer
+- Un conjunto de meta-argumentos para controlar el comportamiento de Terraform para recursos específicos.
 
-```hcl
-# Security group para el balanceador de carga
-resource "aws_security_group" "alb" {
-  name = "alb-security-group"
-}
+- *create_before_destroy* es útil para despliegues con cero *downtime*.
 
-resource "aws_security_group_rule" "allow_alb_http_inbound" {
-  type = "ingress"
-  security_group_id = aws_security_group.alb.id
+- *ignore_changes* previene que Terraform trate de revertir cambios que fueron declarados por fuera.
 
-  from_port = 80
-  to_port = 80
-  protocol = "tcp"
-  cidr_blocks = ["0.0.0.0/0"]
-}
-```
-
-- Creamos un grupo de seguridad para el Load Balancer.
-- Creamos una regla de seguridad para permitir el tráfico HTTP en el puerto 80.
-- La regla permite que cualquier IP acceda al puerto 80.
-
-#### Creación del Load Balancer
+- *prevent_destroy* hace que Terraform rechace cualquier plan que podría destruir alguno de los recursos actuales.
 
 ```hcl
-resource "aws_lb" "load_balancer" {
-  name = "web-app-lb"
-  load_balancer_type = "application"
-  subnets = data.aws_subnet_ids.default_subnets.ids
-  security_groups = [aws_security_group.alb.id]
-}
-```
+resource "aws_instance" "example" {
+  ami = "ami-a1b2c3d4"
+  instance_type = "t2.micro"
 
-- Creamos el Load Balancer.
-- El Load Balancer se llama `web-app-lb`.
-- El Load Balancer es de tipo `application`. Esto significa que el Load Balancer enruta el tráfico basado en la capa de aplicación, como la URL o el contenido de la solicitud.
-- Con `subnets` especificamos las subredes en las que se encuentra el Load Balancer.
-- Con `security_groups` especificamos el grupo de seguridad del Load Balancer. El cual fue creado anteriormente.
-
-#### Creación del Recurso Route 53
-
-```hcl
-resource "aws_route53_zone" "primary" {
-  name = "example.com"
-}
-
-resource "aws_route53_record" "root" {
-  zone_id = aws_route53_zone.primary.zone_id
-  name = "example.com"
-  type = "A"
-
-  alias {
-    name = aws_lb.load_balancer.dns_name
-    zone_id = aws_lb.load_balancer.zone_id
-    evaluate_target_health = true
+  lifecycle {
+    create_before_destroy = true
+    ignore_changes = [
+      # Some resources have metadata
+      # modified automatically outside
+      # of Terraform
+      tags
+    ]
   }
 }
 ```
 
-- Creamos una zona de Route 53.
-- La zona se llama `example.com`.
-- Creamos un registro de Route 53. Un registro es una entrada en la zona de Route 53 que se traduce en una dirección IP o un nombre de dominio.
-- El registro se encuentra en la zona `primary`. La cual fue creada anteriormente.
-- El registro se llama `example.com`.
-- El tipo de registro es `A`. Esto significa que el registro se traduce en una dirección IP.
-- Con `alias` especificamos que el registro se traduce en un alias. Un alias es una referencia a otro recurso de AWS, en este caso, el Load Balancer.
-- Con `name` especificamos el nombre del alias. En este caso, el nombre del Load Balancer.
-- Con `zone_id` especificamos la zona del alias. En este caso, la zona del Load Balancer.
-- Con `evaluate_target_health` especificamos que Route 53 evalúa la salud del alias. Esto significa que Route 53 verifica que el alias esté disponible y responda correctamente al tráfico.
-- Todo el tráfico que llegue a `example.com` será redirigido al Load Balancer.
+### Provisioners
 
-#### Creación de la Base de Datos RDS
+Ejecutan acciones en maquinas locales o remotas.
+
+- Ansible
+- Chef
+- Puppet
+
+Si bien, Terraform se encarga de crear los recursos, estos necesitan ser configurados, necesitan dependencias y configuraciones variadas para poder ejecutar el Software que se planea delegar en estos. Los **Provisioners** se encargan de automatizar esto.
+
+## Organización del Proyecto - Módulos
+
+Un módulo es un contenedor para múltiples recursos que son usados en conjunto. Un módulo consiste en una serie de archivos `.tf` y/o `tf.json` que son almacenados juntos en un directorio.
+
+Los módulos son la forma principal de empaquetar y re-usar recursos configurados con Terraform.
+
+### Tipos de Módulos
+
+- `Root Module`: Por defecto contiene todos los archivos **.tf* en el directorio de trabajo principal.
+- `Child Module`: Un módulo separado que es usado en algún archivo **.tf** del modulo Root.
+
+Estos módulos pueden venir desde una variedad de fuentes:
+
+- Locales
 
 ```hcl
-resource "aws_db_instance" "db_instance" {
-  allocated_storage = 20
-  storage_type = "standard"
-  engine = "postgres"
-  engine_version = "12.5"
-  instance_class = "db.t2.micro"
+module "web-app" {
+  source = ".../web-app"
+}
+```
+
+- Terraform Registry
+
+```hcl
+module "consul" {
+  source = "hashicorp/consul/aws"
+  version = "0.1.0"
+}
+```
+
+- GitHub
+
+```hcl
+# HTTPS
+modules "example" {
+  source = "github.com/hashicorp/example?ref=v1.2.0"
+}
+
+# SSH
+module "example" {
+  source = "git@github.com:hashicorp/example.git"
+}
+
+# Generic
+module "example" {
+  source = "git::ssh://username@example.com/storage.git"
+}
+```
+
+- Bitbucket
+- Git, Mercurial, etc.
+- HTTP URLs
+- S3 buckets
+- GCS buckets
+
+### Inputs + Meta-arguments
+
+- Inputs variables son pasadas en el bloque de código.
+
+```hcl
+module "web-app" {
+  source = ".../web-app-module"
+
+  # Input Variables
+  bucket_name = "example-bucket-web-app-data"
+  domain = "example.com"
   db_name = "mydb"
-  username = "myuser"
-  password = "password"
-  skip_final_snapshot = true
+  db_user = "user"
+  db_pass = var.db_pass
 }
 ```
 
-- Creamos una instancia de base de datos RDS.
-- La instancia tiene un almacenamiento de 20 GB.
-- El tipo de almacenamiento es `standard`. Esto significa que el almacenamiento es magnético.
-- El motor de la base de datos es `postgres`.
-- La versión del motor de la base de datos es `12.5`.
-- La clase de instancia es `db.t2.micro`.
-- Configuramos el nombre, el usuario y la contraseña de la base de datos.
-- Con `skip_final_snapshot` especificamos que no se crea una instantánea final de la base de datos. Esto significa que cuando eliminamos la base de datos, no se crea una instantánea de la base de datos en donde se guarda una copia de la base de datos, esto se suele hacer por si acaso se necesita recuperar la base de datos.
+#### Meta-arguments
 
-### Resumen
+- count
+- for_each
+- providers
+- depends_on
 
-Con este archivo de configuración, creamos los recursos y los configuramos para la aplicación.
+### Como se ve un buen Módulo
 
-Hay varias cosas que se pueden mejorar, como la configuración de la base de datos en donde estamos dejando las credenciales harcodeadas, lo cual no es seguro. También podemos crear una VPC especifica para la aplicación, en lugar de usar la VPC por defecto. También estamos permitiendo que el trafico se haga desde cualquier IP y en HTTP, en vez de HTTPS. Todo esto se puede mejorar en futuras iteraciones.
+- Eleva el nivel de abstracción de los tipos de recursos básicos.
+
+- Agrupa los recursos de forma lógica.
+
+- Expone inputs variables que permiten la customización necesaria.
+
+- Provee defaults útiles.
+
+- Devuelve outputs para que posibles integraciones futuras sean más fáciles.
+
+### Terraform Registry
+
+Contiene todos lo módulos disponibles de Terraform, son un conjunto de recursos pre configurados que podemos usar.
+
+## Trabajando con Múltiples Entornos
+
+En los entornos de trabajo actuales, es común teener multiples entornos de trabajo, por ejemplo:
+
+- Desarrollo
+- Staging
+- Producción
+
+En donde cada uno de estos entornos tiene sus propias configuraciones, recursos, etc.
+
+### Dos Enfoques Principales
+
+#### Workspaces
+
+- Multiples entornos con nombre con un mismo backend.
+
+```bash
+terraform workspace new dev
+terraform workspace new staging
+terraform workspace new prod
+```
+
+```bash
+terraform workspace list
+```
+
+Terraform nos brinda una forma para trabajar con múltiples entornos mediante el comando `terraform workspace`, este comando nos permite crear, listar y seleccionar diferentes entornos de trabajo.
+
+#### File Structure
+
+- Separación de ambientes por directorios.
+
+```bash
+.
+├── _modules
+│   ├── module-1
+│   │    └── main.tf
+│   │    └── variables.tf
+│   └── module-2
+│        └── main.tf
+│        └── variables.tf
+├── dev
+│   ├── main.tf
+│   └── terraform.tfvars
+├── staging
+│   ├── main.tf
+│   └── terraform.tfvars
+└── prod
+    ├── main.tf
+    └── terraform.tfvars
+```
+
+En este enfoque, separamos los ambientes de trabajo en diferentes directorios, cada uno con sus propios archivos de configuración, variables, etc.
+
+### Pros y Contras
+
+#### Workspaces
+
+- Pros
+  - Fácil de usar
+  - *terraform.workspace* variable
+  - Minimiza la duplicación del código
+- Contras
+  - Propenso a error humano
+  - El estado es almacenado en el mismo backend
+  - Es difícil saber en que ambiente se está trabajando con solo ver el código
+
+#### File Structure
+
+- Pros
+  - Separación de los backends
+  - Seguridad mejorada
+  - Reduce el riesgo de error humano
+  - El código representa bien el estado de los despliegues
+- Contras
+  - Hay que ejecutar `terraform apply` múltiples veces
+  - Mas duplicación de código.
+
+### File Structure (environments  + componentes)
+
+- Mayor separación (componentes separados en grupos de forma lógica). Util para proyectos grandes.
+  - Aislar los componentes que cambian continuamente de los que no.
+- Hacer referencia a diferentes recursos entre configuraciones es posible usando *terraform_remote_state*.
+
+```bash
+.
+├── _modules
+│   ├── compute-module
+│   │    └── main.tf
+│   │    └── variables.tf
+│   └── network-module
+│        └── main.tf
+│        └── variables.tf
+├── dev
+│   ├── compute
+│   │    ├── main.tf
+│   │    └── terraform.tfvars
+│   ├── network
+│   │    ├── main.tf
+│   │    └── terraform.tfvars
+├── staging
+│   ├── compute
+│   │    ├── main.tf
+│   │    └── terraform.tfvars
+│   ├── network
+│   │    ├── main.tf
+│   │    └── terraform.tfvars
+└── prod
+    ├── compute
+    │    ├── main.tf
+    │    └── terraform.tfvars
+    ├── network
+    │    ├── main.tf
+    │    └── terraform.tfvars
+```
+
+#### Terragrunt
+
+Terragrunt es una herramienta que nos permite trabajar con múltiples entornos de forma más sencilla.
+
+- Creada por [Gruntwork](https://gruntwork.io/) nos brinda utilidades para hacer ciertos casos de uso de Terraform más sencillos.
+  - Enfoque DRY (Don't Repeat Yourself)
+  - Ejecuta comando entre múltiples TF configs
+  - Facilita trabajar con múltiples cuentas de Cloud
+
+## Testing
+
+### Code Rot
+
+En general, a medida que pasa el tiempo, el código tiende a deteriorarse, muchas partes que conforman nuestro código cambian, las dependencias se actualizan, los servicios cambian, etc. El testing se usa para asegurarse de que esto no impacte de manera negativa en nuestro código, esto es aplicable también con Terraform.
+
+En terraform es común que ocurra que alguien haga un cambio de un recurso mediante la consola, lo cual causa un conflicto con la configuración de terraform. Un test nos puede alertar de esto.
+
+### Tipos de Test para Terraform
+
+#### Static Checks
+
+Los que trae Terraform por defecto, por ejemplo:
+
+- `terraform fmt`
+- `terraform validate`
+- `terraform plan`
+- Reglas de validación personalizadas
+
+```hcl
+variable "short_variable" {
+  type = string
+
+  validation {
+    condition = length(var.short_variable) < 4
+    error_message = "The short_variable value must be less than 4 characters!"
+  }
+}
+```
+
+Herramientas externas:
+
+- `tflint`
+- `checkov`, `tfsec`, `terrascan`, `terraform-compliance`, `snyk`
+- `Terraform Sentinel` (Enterprise only)
+
+### Automated Testing
+
+#### Using Bash
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Change directory to example
+cd ../../examples/hello-world
+
+# Create the resources
+terraform init
+terraform apply -auto-approve
+
+# Wait while the instance boots up
+# (Could also use a provisioner in the TF config to do this)
+sleep 60 
+
+# Query the output, extract the IP and make a request
+terraform output -json |\
+jq -r '.instance_ip_addr.value' |\
+xargs -I {} curl http://{}:8080 -m 10
+
+# If request succeeds, destroy the resources
+terraform destroy -auto-approve
+```
+
+Este script de bash se encarga de desplegar los recursos, esperar a que el servidor este listo, hacer una petición a la IP del servidor y si todo sale bien, destruir los recursos.
+
+#### Using Terratest
+
+Terratest es una librería de Go que nos permite escribir tests para Terraform.
+
+```go
+package test
+
+import (
+	"crypto/tls"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/gruntwork-io/terratest/modules/http-helper"
+	"github.com/gruntwork-io/terratest/modules/terraform"
+)
+
+func TestTerraformHelloWorldExample(t *testing.T) {
+	// retryable errors in terraform testing.
+	terraformOptions := terraform.WithDefaultRetryableErrors(t, &terraform.Options{
+		TerraformDir: "../../examples/hello-world",
+	})
+
+	defer terraform.Destroy(t, terraformOptions)
+
+	terraform.InitAndApply(t, terraformOptions)
+
+	instanceURL := terraform.Output(t, terraformOptions, "url")
+	tlsConfig := tls.Config{}
+	maxRetries := 30
+	timeBetweenRetries := 10 * time.Second
+
+	http_helper.HttpGetWithRetryWithCustomValidation(
+		t, instanceURL, &tlsConfig, maxRetries, timeBetweenRetries, validate,
+	)
+
+}
+
+func validate(status int, body string) bool {
+	fmt.Println(body)
+	return status == 200
+}
+```
+
+Este test se encarga de desplegar los recursos, esperar a que el servidor este listo, hacer una petición a la IP del servidor y si todo sale bien, destruir los recursos. Lo mismo que el script de bash, pero en Go.
+
+#### Aplicar terraform plan periódicamente
+
+Otra forma de testear nuestro código es aplicar `terraform plan` periódicamente, por ejemplo, en un pipeline de CI/CD, con esto nos aseguramos de que terraform se entere sobre los cambios que se han hecho por fuera de la herramienta.
+
+## Developer Workflows
+
+### General Workflow
+
+- Escribir/actualizar código
+- Ejecutar los cambios localmente
+- Crear un Pull Request
+- Ejecutar los test en un ambiente de Integración Continua
+- Hacer el deploy a un ambiente de Staging mediante Continuous Deployment (o hacer merge a la rama principal)
+- Hacer el Deploy a Producción mediante Continuous Deployment
+
+### Multi accounts / projects
+
+Algo que se recomienda por el equipo de Terraform es tener una cuenta para cada entorno, para desarrollo, otra para staging y otra para producción.
+
+- Simplifica las IAM policies para reforzar el control para diferentes entornos (y TF backends remotos).
+
+- Aísla los entornos para mitigar el alcance de posibles errores.
+
+- Reduce el conflicto entre recursos con el mismo nombre.
+
+- **Contra**: Añade complejidad a la configuración de Terraform.
+
+### Herramientas adicionales
+
+- `Terragrunt`
+  - Minimiza la duplicación del código
+  - Permite trabajar con múltiples cuentas de Cloud
+
+- `Cloud Nuke`
+  - Fácil limpieza de recursos no deseados
+
+- `Makefiles`
+  - Automatiza tareas comunes
+  - Previenen errores humanos
+
+
+### CI/CD
+
+- GitLab CI/CD
+- GitHub Actions
+- CircleCI
+- Atlantis
+
+### Errores comunes
+
+- ``Cambios de nombres cuando se refactoriza el código``, esto hace pensar a Terraform que queremos eliminar un recurso y crear otro con el nuevo nombre.
+- ``Datos sensibles en el archivo de estado, por ejemplo, contraseñas, claves privadas, etc.``, esto puede ser target para posibles ataques.
+- `Cloud timeouts`, si algún recurso tarda demasiado en crearse, Terraform lo considera como un error, esto puede causar que a veces no se cree la infraestructura correctamente.
+- `Conflictos con los nombres de los recursos`, si dos recursos tienen el mismo nombre, Terraform no sabrá a cual de los dos nos referimos.
+- `Olvidar destruir test-infra`, podemos llegar a olvidarnos de destruir infraestructura que estábamos usando para pruebas, esto puede causar costos innecesarios.
+- `Uni-directional version upgrades`, puede que estemos trabajando con la version 1.0.0 por ejemplo y un compañero ejecuta terraform con la versión 1.1.0, esto causa que nosotros que estábamos trabajando con una versión anterior ya no podamos usar mas terraform hasta que actualicemos nuestra versión.
+- `Multiples formas de hacer lo mismo`, esto puede causar confusión y errores.
+- `Algunos parámetros son inmutables`, cuando creamos un recurso, algunos parámetros no pueden ser cambiados, por ejemplo, el tamaño de una base de datos, si queremos cambiar el tamaño de la base de datos, debemos destruir la base de datos y crear una nueva.
+- `Out of band changes`, si alguien hace un cambio por fuera de Terraform, esto puede causar problemas.
+
+## Workflow con GitHub Actions
+
+```yaml
+name: "Terraform"
+
+on:
+  # Uncomment to enable staging deploy from main
+  # push:
+  #   branches:
+  #     - main
+  release:
+    types: [published]
+  pull_request:
+
+jobs:
+  terraform:
+    name: "Terraform"
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    defaults:
+      run:
+        working-directory: 07-managing-multiple-environments/file-structure/staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.1
+          terraform_wrapper: false
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        if: github.event_name == 'pull_request'
+        # Route 53 zone must already exist for this to succeed!
+        run: terraform plan -var db_pass=${{secrets.DB_PASS }} -no-color
+        continue-on-error: true
+
+      - uses: actions/github-script@0.9.0
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`${process.env.PLAN}\`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+              
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '^1.15.5'
+          
+      - name : Terratest Execution
+        if: github.event_name == 'pull_request'
+        working-directory: 08-testing/tests/terratest
+        run: |
+          go test . -v timeout 10m
+
+      - name: Check tag
+        id: check-tag
+        run: |
+          if [[ ${{ github.ref }} =~ ^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo ::set-output name=environment::production
+          elif [[ ${{ github.ref }} == 'refs/heads/main' ]]; then echo ::set-output name=environment::staging
+          else echo ::set-output name=environment::unknown
+          fi
+
+      - name: Terraform Apply Global
+        if: github.event_name == 'push' || github.event_name == 'release'
+        working-directory: 07-managing-multiple-environments/file-structure/global
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Terraform Apply Staging
+        if: steps.check-tag.outputs.environment == 'staging' && github.event_name == 'push'
+        run: terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
+
+      - name: Terraform Apply Production
+        if: steps.check-tag.outputs.environment == 'production' && github.event_name == 'release'
+        working-directory: 07-managing-multiple-environments/file-structure/production
+        run: |
+          terraform init
+          terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
+```
+
+Análisis por partes:
+
+```yaml
+name: "Terraform"
+
+on:
+  # Uncomment to enable staging deploy from main
+  # push:
+  #   branches:
+  #     - main
+  release:
+    types: [published]
+  pull_request:
+```
+
+En este bloque se define cuando se va a ejecutar el workflow, en este caso, cuando se haga un release o un pull request.
+
+```yaml
+jobs:
+  terraform:
+    name: "Terraform"
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    defaults:
+      run:
+        working-directory: 07-managing-multiple-environments/file-structure/staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+```
+
+En este bloque se define el job, en este caso, se llama `terraform`, se ejecutará en un ambiente de ubuntu, se definen las variables de entorno y el directorio de trabajo.
+
+```yaml
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.1
+          terraform_wrapper: false
+```
+
+En este bloque se configura Terraform, se define la versión de Terraform que se va a usar.
+
+```yaml
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+```
+
+En este bloque se ejecutan los comandos `terraform fmt` y `terraform init`.
+
+```yaml
+      - name: Terraform Plan
+        id: plan
+        if: github.event_name == 'pull_request'
+        # Route 53 zone must already exist for this to succeed!
+        run: terraform plan -var db_pass=${{secrets.DB_PASS }} -no-color
+        continue-on-error: true
+```
+
+En este bloque se ejecuta el comando `terraform plan`, pero solo si el evento es un pull request.
+
+```yaml
+      - uses: actions/github-script@0.9.0
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`${process.env.PLAN}\`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`
+```
+
+En este bloque se crea un comentario en el pull request con los resultados de los comandos anteriores.
+
+```yaml
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+```
+
+En este bloque se verifica si el comando `terraform plan` falló, si es así, se termina el workflow.
+
+```yaml
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '^1.15.5'
+          
+      - name : Terratest Execution
+        if: github.event_name == 'pull_request'
+        working-directory: 08-testing/tests/terratest
+        run: |
+          go test . -v timeout 10m
+```
+
+En este bloque se ejecutan los tests de Terratest.
+
+```yaml
+      - name: Check tag
+        id: check-tag
+        run: |
+          if [[ ${{ github.ref }} =~ ^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo ::set-output name=environment::production
+          elif [[ ${{ github.ref }} == 'refs/heads/main' ]]; then echo ::set-output name=environment::staging
+          else echo ::set-output name=environment::unknown
+          fi
+```
+
+En este bloque se verifica si el evento es un release o un push a la rama main.
+
+```yaml
+      - name: Terraform Apply Global
+        if: github.event_name == 'push' || github.event_name == 'release'
+        working-directory: 07-managing-multiple-environments/file-structure/global
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Terraform Apply Staging
+        if: steps.check-tag.outputs.environment == 'staging' && github.event_name == 'push'
+        run: terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
+
+      - name: Terraform Apply Production
+        if: steps.check-tag.outputs.environment == 'production' && github.event_name == 'release'
+        working-directory: 07-managing-multiple-environments/file-structure/production
+        run: |
+          terraform init
+          terraform apply -var db_pass=${{secrets.DB_PASS }} -auto-approve
+```
+
+En este bloque se ejecutan los comandos `terraform apply` dependiendo del ambiente.
